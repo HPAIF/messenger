@@ -9,7 +9,7 @@ final class ConversationStore {
     private(set) var conversations: [Conversation] = []
     let directory: URL
 
-    static var defaultDirectory: URL {
+    nonisolated static var defaultDirectory: URL {
         URL.applicationSupportDirectory
             .appending(path: "HPAIF Messenger", directoryHint: .isDirectory)
             .appending(path: "conversations", directoryHint: .isDirectory)

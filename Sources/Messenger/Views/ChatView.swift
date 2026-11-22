@@ -12,8 +12,15 @@ struct ChatView: View {
                 header(conversation)
                 Divider()
                 messages(conversation)
+                if let phase = model.phase[conversationID] {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text(phase).font(.caption).foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 6)
+                }
                 Divider()
-                composer
+                composer(isGroup: conversation.isGroup)
             }
         }
     }
@@ -50,7 +57,7 @@ struct ChatView: View {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     if conversation.messages.isEmpty {
                         Text(conversation.isGroup
-                             ? "Each message goes to every agent in turn; later agents see earlier replies."
+                             ? "Members answer only when your message concerns them. Write @name to ask one member directly; they can @mention each other too."
                              : "Say hello to \(model.agent(conversation.participants.first ?? "").title).")
                             .font(.callout)
                             .foregroundStyle(.secondary)
@@ -67,18 +74,19 @@ struct ChatView: View {
             .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
             .onChange(of: conversation.messages.count) { proxy.scrollTo("bottom", anchor: .bottom) }
             .onChange(of: conversation.messages.last?.text) { proxy.scrollTo("bottom", anchor: .bottom) }
-            .onChange(of: conversation.messages.last?.activity.count) { proxy.scrollTo("bottom", anchor: .bottom) }
+            .onChange(of: conversation.messages.last?.status) { proxy.scrollTo("bottom", anchor: .bottom) }
         }
     }
 
-    private var composer: some View {
+    private func composer(isGroup: Bool) -> some View {
         let running = model.isRunning(conversationID)
         return HStack(alignment: .bottom, spacing: 8) {
             ComposerTextView(text: $draft, height: $composerHeight, onSubmit: send)
                 .frame(height: composerHeight)
                 .overlay(alignment: .topLeading) {
                     if draft.isEmpty {
-                        Text("Message  ·  Enter to send, Shift+Enter for a new line")
+                        Text(isGroup ? "Message  ·  @name to ask one member  ·  Shift+Enter for a new line"
+                                     : "Message  ·  Enter to send, Shift+Enter for a new line")
                             .foregroundStyle(.tertiary)
                             .padding(.top, 2)
                             .allowsHitTesting(false)
@@ -138,12 +146,17 @@ struct MessageBubble: View {
         }
     }
 
-    /// Progress line while a reply streams. With tool steps hidden it only counts them.
+    /// Live status while a reply streams: the real step ("Reading notes.md"), or typing.
     private var statusLine: String {
-        if !message.text.isEmpty { return "Writing…" }
-        let steps = message.activity.count
-        if steps == 0 || model.settings.showToolSteps { return "Thinking…" }
-        return steps == 1 ? "Working… (1 step)" : "Working… (\(steps) steps)"
+        if let status = message.status { return status }
+        return message.text.isEmpty ? "Thinking…" : "typing"
+    }
+
+    /// While an agent may be about to say PASS, don't flash the word.
+    private var visibleText: String {
+        guard message.isStreaming else { return message.text }
+        let t = message.text.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        return (!t.isEmpty && t.count <= 4 && "PASS".hasPrefix(t)) ? "" : message.text
     }
 
     private var agentBubble: some View {
@@ -163,16 +176,21 @@ struct MessageBubble: View {
                     .foregroundStyle(.secondary)
                 }
 
-                if !message.text.isEmpty {
-                    Text(markdown(message.text))
+                if !visibleText.isEmpty {
+                    Text(markdown(visibleText))
                         .textSelection(.enabled)
                 }
 
                 if message.isStreaming {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text(statusLine)
-                            .font(.caption).foregroundStyle(.secondary)
+                    if statusLine == "typing" {
+                        TypingIndicator()
+                    } else {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text(statusLine)
+                                .font(.caption).foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
                     }
                 }
                 if message.wasStopped {
@@ -211,5 +229,23 @@ private struct AgentChipStyle: LabelStyle {
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
         .background(color.opacity(0.12), in: Capsule())
+    }
+}
+
+/// "typing" with three pulsing dots.
+struct TypingIndicator: View {
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.35)) { context in
+            let step = Int(context.date.timeIntervalSinceReferenceDate / 0.35) % 3
+            HStack(spacing: 3) {
+                Text("typing").font(.caption).foregroundStyle(.secondary)
+                ForEach(0..<3, id: \.self) { i in
+                    Circle()
+                        .frame(width: 4, height: 4)
+                        .foregroundStyle(.secondary)
+                        .opacity(i == step ? 1 : 0.3)
+                }
+            }
+        }
     }
 }

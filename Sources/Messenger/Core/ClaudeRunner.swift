@@ -8,6 +8,14 @@ struct RunRequest: Sendable {
     var resumeSessionID: String?
     var workingDirectory: URL
     var permissionMode: String = "default"
+    /// Extra instructions added to the system prompt (group-chat rules).
+    var appendSystemPrompt: String?
+    /// Model override (the speaker router uses a small, fast model).
+    var model: String?
+    /// Built-in tools to allow; `""` disables all tools. nil = Claude Code's default set.
+    var tools: String?
+    /// false = don't save this run as a session (one-off calls such as the router).
+    var persistSession = true
 
     var arguments: [String] {
         var args = [
@@ -20,6 +28,10 @@ struct RunRequest: Sendable {
         ]
         if let agent { args += ["--agent", agent] }
         if let resumeSessionID { args += ["--resume", resumeSessionID] }
+        if let appendSystemPrompt, !appendSystemPrompt.isEmpty { args += ["--append-system-prompt", appendSystemPrompt] }
+        if let model { args += ["--model", model] }
+        if let tools { args += ["--tools", tools] }
+        if !persistSession { args.append("--no-session-persistence") }
         args += ["--", prompt]                 // `--` so a message starting with "-" is not an option
         return args
     }

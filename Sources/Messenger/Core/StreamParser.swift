@@ -8,6 +8,8 @@ enum RunEvent: Sendable, Equatable {
     case text(String)
     /// A one-line tool activity summary, e.g. "🔧 Read notes.md".
     case tool(String)
+    /// A human status for the step that just started, e.g. "Reading notes.md".
+    case status(String)
     /// The final `result` event.
     case result(text: String?, isError: Bool)
     /// The process ended. Always the last event.
@@ -66,7 +68,9 @@ struct StreamParser {
                     }
                 case "tool_use":
                     let name = block["name"] as? String ?? "tool"
-                    events.append(.tool(Self.toolSummary(name: name, input: block["input"] as? [String: Any])))
+                    let input = block["input"] as? [String: Any]
+                    events.append(.tool(Self.toolSummary(name: name, input: input)))
+                    events.append(.status(Self.friendlyStatus(name: name, input: input)))
                 default:
                     break
                 }
@@ -94,6 +98,31 @@ struct StreamParser {
         hasEmittedText = true
         lastTextMessageID = messageID
         return .text(chunk)
+    }
+
+    /// Plain-language status for a tool call — what the agent is doing, without raw commands.
+    static func friendlyStatus(name: String, input: [String: Any]?) -> String {
+        func file(_ key: String) -> String? {
+            (input?[key] as? String).map { URL(fileURLWithPath: $0).lastPathComponent }
+        }
+        func host(_ key: String) -> String? {
+            (input?[key] as? String).flatMap { URL(string: $0)?.host }
+        }
+        let shortName = name.hasPrefix("mcp__") ? String(name.split(separator: "_").last ?? Substring(name)) : name
+        switch shortName {
+        case "Read", "NotebookRead": return file("file_path").map { "Reading \($0)" } ?? "Reading a file"
+        case "Grep", "Glob", "LS": return "Searching files"
+        case "Edit", "MultiEdit", "Write", "NotebookEdit":
+            return file("file_path").map { "Updating \($0)" } ?? "Updating a file"
+        case "Bash": return "Running a check"
+        case "WebSearch": return "Searching the web"
+        case "WebFetch": return host("url").map { "Opening \($0)" } ?? "Opening a web page"
+        case "Skill": return (input?["skill"] as? String).map { "Using \($0.split(separator: ":").last.map(String.init) ?? $0)" } ?? "Using a skill"
+        case "Agent", "Task":
+            return (input?["subagent_type"] as? String).map { "Asking \($0.split(separator: ":").last.map(String.init) ?? $0)" } ?? "Asking a helper"
+        case "TodoWrite": return "Planning the steps"
+        default: return "Working"
+        }
     }
 
     static func toolSummary(name: String, input: [String: Any]?) -> String {

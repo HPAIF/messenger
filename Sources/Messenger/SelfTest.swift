@@ -53,6 +53,20 @@ enum SelfTest {
         check(tools == ["🔧 Read ai-team/team.md"], "tool summary (got \(tools))")
         check(parser.sessionID == "11111111-2222-3333-4444-555555555555", "session id captured")
         check(events.contains(.result(text: "done", isError: false)), "result event")
+        let statuses = events.compactMap { if case .status(let s) = $0 { s } else { nil } }
+        check(statuses == ["Reading team.md"], "live status for a tool step (got \(statuses))")
+        check(AppModel.isPass("PASS") && AppModel.isPass(" **pass.** ") && !AppModel.isPass("Passport needed"),
+              "PASS detection")
+
+        // Saved conversations still load with the current model (read-only check)
+        print("\n[2b] Saved conversations")
+        let dir = ConversationStore.defaultDirectory
+        let files = ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension == "json" }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let loaded = files.filter { (try? decoder.decode(Conversation.self, from: Data(contentsOf: $0))) != nil }
+        check(loaded.count == files.count, "all \(files.count) saved conversation(s) load (\(loaded.count) loaded)")
 
         // 3. One tiny real call, no agent, in a temporary folder
         print("\n[3] Real call: claude -p \"Reply with exactly: pong\" (no agent, temp folder)")
@@ -77,7 +91,7 @@ enum SelfTest {
                 switch event {
                 case .session(let id): sessionID = id
                 case .text(let t): reply += t
-                case .tool: break
+                case .tool, .status: break
                 case let .result(text, isError): if isError { resultError = text }
                 case let .exited(code, err): exitCode = code; stderr = err
                 }

@@ -16,6 +16,9 @@ struct Message: Identifiable, Codable, Hashable, Sendable {
     var activity: [String] = []
     /// Error output (CLI result error or stderr) if the run failed.
     var error: String?
+    /// Live status while the reply is in progress ("Reading notes.md", "typing").
+    /// Optional so conversations saved by older versions still load.
+    var status: String?
     var isStreaming = false
     var wasStopped = false
     var date = Date()

@@ -9,6 +9,9 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     var messages: [Message] = []
     /// Claude Code session id per agent, used with `--resume`.
     var sessionIDs: [String: String] = [:]
+    /// Group chats: id of the last message each agent has been given, so its next turn includes
+    /// everything said since (founder messages too). Optional so older files still load.
+    var lastSeenMessageID: [String: UUID]?
     /// Company folder the agents run in. Sessions are tied to it, so it is fixed per conversation.
     var workspacePath: String?
     var createdAt = Date()

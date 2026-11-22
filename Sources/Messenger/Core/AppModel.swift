@@ -17,6 +17,10 @@ final class AppModel {
     var selection: SidebarSelection?
     var showingNewGroup = false
     private var runningTasks: [UUID: Task<Void, Never>] = [:]
+    /// Short line shown in a group chat while the app decides who speaks.
+    var phase: [UUID: String] = [:]
+    /// Most agent replies to one founder message (agents can @mention each other).
+    static let maxAgentTurnsPerMessage = 4
 
     init() {
         reloadAgents()
@@ -121,30 +125,72 @@ final class AppModel {
         runningTasks.values.forEach { $0.cancel() }
     }
 
-    /// Sends the message to each participant in turn. In a group, each agent also sees
-    /// the other agents' replies since its own last turn.
+    /// One-to-one: the agent answers. Group: only the members the message concerns answer
+    /// (explicit @mentions, else a quick router call); a member may PASS (hidden), and a member
+    /// can @mention a colleague, who then gets a turn — at most `maxAgentTurnsPerMessage` turns.
     private func runRound(conversationID: UUID, userText: String, workspace: URL) async {
-        guard let participants = store.conversation(conversationID)?.participants else { return }
-
-        for agentID in participants {
-            guard !Task.isCancelled, let conversation = store.conversation(conversationID) else { return }
-
-            let prompt = conversation.isGroup
-                ? groupPrompt(userText: userText, for: agentID, in: conversation)
-                : userText
-            let reply = Message(kind: .agent, agentID: agentID, isStreaming: true)
-            store.update(conversationID) { $0.messages.append(reply) }
-
-            let request = RunRequest(
-                claudePath: settings.claudePath,
-                prompt: prompt,
-                agent: agentID,
-                resumeSessionID: conversation.sessionIDs[agentID],
-                workingDirectory: workspace,
-                permissionMode: settings.permissionMode
-            )
-            await run(request, conversationID: conversationID, messageID: reply.id, agentID: agentID)
+        guard let conversation = store.conversation(conversationID),
+              let first = conversation.participants.first else { return }
+        guard conversation.isGroup else {
+            _ = await runTurn(agentID: first, prompt: userText, systemPrompt: nil,
+                              conversationID: conversationID, workspace: workspace)
+            return
         }
+
+        var queue = await chooseSpeakers(for: userText, in: conversation)
+        var askedBy: [String: String] = [:]   // agent id -> name of the colleague who @mentioned it
+        var turns = 0
+        while !queue.isEmpty, turns < Self.maxAgentTurnsPerMessage, !Task.isCancelled {
+            let agentID = queue.removeFirst()
+            guard let current = store.conversation(conversationID) else { return }
+            turns += 1
+            let reply = await runTurn(
+                agentID: agentID,
+                prompt: groupPrompt(for: agentID, in: current, askedBy: askedBy[agentID]),
+                systemPrompt: groupRules(for: agentID, in: current),
+                conversationID: conversationID,
+                workspace: workspace
+            )
+            defer { markSeen(agentID, in: conversationID) }
+            guard let reply, !Task.isCancelled else { continue }
+            if Self.isPass(reply.text) {
+                store.update(conversationID) { $0.messages.removeAll { $0.id == reply.id } }
+                continue
+            }
+            askedBy[agentID] = nil
+            for mentioned in mentions(in: reply.text, of: current.participants, excluding: agentID)
+            where !queue.contains(mentioned) {
+                queue.append(mentioned)
+                askedBy[mentioned] = agent(agentID).name
+            }
+        }
+        if !queue.isEmpty, !Task.isCancelled {
+            let names = queue.map { "@" + agent($0).name }.joined(separator: ", ")
+            store.update(conversationID) {
+                $0.messages.append(.notice("Paused after \(Self.maxAgentTurnsPerMessage) replies. \(names) was asked something; send a message to continue."))
+            }
+        }
+    }
+
+    /// Runs one agent reply and returns its message id and final text (nil if it failed).
+    private func runTurn(agentID: String, prompt: String, systemPrompt: String?,
+                         conversationID: UUID, workspace: URL) async -> (id: UUID, text: String)? {
+        guard let conversation = store.conversation(conversationID) else { return nil }
+        let reply = Message(kind: .agent, agentID: agentID, isStreaming: true)
+        store.update(conversationID) { $0.messages.append(reply) }
+        let request = RunRequest(
+            claudePath: settings.claudePath,
+            prompt: prompt,
+            agent: agentID,
+            resumeSessionID: conversation.sessionIDs[agentID],
+            workingDirectory: workspace,
+            permissionMode: settings.permissionMode,
+            appendSystemPrompt: systemPrompt
+        )
+        await run(request, conversationID: conversationID, messageID: reply.id, agentID: agentID)
+        guard let message = store.conversation(conversationID)?.messages.first(where: { $0.id == reply.id }),
+              message.error == nil, !message.wasStopped else { return nil }
+        return (reply.id, message.text)
     }
 
     private func run(_ request: RunRequest, conversationID: UUID, messageID: UUID, agentID: String) async {
@@ -165,9 +211,11 @@ final class AppModel {
                 case .session(let id):
                     store.update(conversationID) { $0.sessionIDs[agentID] = id }
                 case .text(let chunk):
-                    edit { $0.text += chunk }
+                    edit { $0.text += chunk; $0.status = "typing" }
                 case .tool(let summary):
                     edit { $0.activity.append(summary) }
+                case .status(let status):
+                    edit { $0.status = status }
                 case let .result(text, isError):
                     if isError { resultError = text ?? "The agent reported an error." }
                 case let .exited(code, output):
@@ -180,7 +228,7 @@ final class AppModel {
         }
 
         if Task.isCancelled {
-            edit(persist: true) { $0.isStreaming = false; $0.wasStopped = true }
+            edit(persist: true) { $0.isStreaming = false; $0.wasStopped = true; $0.status = nil }
             return
         }
 
@@ -201,38 +249,144 @@ final class AppModel {
         let duplicatedText = resultError
         edit(persist: true) { message in
             message.isStreaming = false
+            message.status = nil
             message.error = errorText
             // Errors like "Not logged in" arrive as assistant text too; show them once.
             if let duplicatedText, message.text == duplicatedText { message.text = "" }
         }
     }
 
-    private func groupPrompt(userText: String, for agentID: String, in conversation: Conversation) -> String {
+    // MARK: - Group chat
+
+    /// Rules every agent follows in a group chat (added to its system prompt).
+    private func groupRules(for agentID: String, in conversation: Conversation) -> String {
         let me = agent(agentID)
-        let others = conversation.participants.filter { $0 != agentID }.map { agent($0) }
-
-        // Replies by other agents since this agent last spoke (or ever, on its first turn).
-        let lastOwnIndex = conversation.messages.lastIndex { $0.kind == .agent && $0.agentID == agentID }
-        let start = lastOwnIndex.map { conversation.messages.index(after: $0) } ?? conversation.messages.startIndex
-        let earlier = conversation.messages[start...].filter {
-            $0.kind == .agent && $0.agentID != agentID && !$0.text.isEmpty
-        }
-
-        var prompt = """
-        [Group chat in HPAIF Messenger. You are \(me.name) (\(me.id)). \
-        Also in this chat: the founder and \(others.map { "\($0.name) (\($0.id))" }.joined(separator: ", ")). \
-        Agents reply one after another.]
-
-        Founder's message:
-        \(userText)
+        let others = conversation.participants.filter { $0 != agentID }
+            .map { "\(agent($0).title) (@\(agent($0).name))" }.joined(separator: ", ")
+        return """
+        You are \(me.title) (@\(me.name)) in a group chat in HPAIF Messenger with the founder and your \
+        AI Team colleagues: \(others). Everyone sees every message. Group-chat rules (they override your \
+        default answer format here):
+        1. Speak only when you add something new and important from your own area. If you have nothing \
+        to add, reply with exactly: PASS
+        2. Never repeat, summarise or agree with what a colleague already said. No openers such as \
+        "Thanks", "Understood", "I agree", "Got it".
+        3. Never tell the founder what to ask or answer a colleague, and never ask questions on a \
+        colleague's behalf. If you need a colleague's input, write @name and your question in your \
+        message; the app gives that colleague a turn.
+        4. Ask the founder only questions from your own area: at most two, the most important first.
+        5. Be brief: a few lines unless the content truly needs more. Keep warnings (UNVERIFIED, \
+        escalation), numbers, dates and decisions the founder must make.
         """
-        if !earlier.isEmpty {
-            prompt += "\n\nReplies from your colleagues since your last turn:\n"
-            for message in earlier {
-                prompt += "\n[\(agent(message.agentID ?? "").name)]: \(message.text)\n"
-            }
-            prompt += "\nBuild on these replies where useful; don't repeat what was already said."
+    }
+
+    /// Everything said since this agent's previous turn (founder and colleagues), so an agent
+    /// that was skipped still has the full picture.
+    private func groupPrompt(for agentID: String, in conversation: Conversation, askedBy: String?) -> String {
+        let messages = conversation.messages
+        var start = messages.startIndex
+        if let seen = conversation.lastSeenMessageID?[agentID],
+           let i = messages.firstIndex(where: { $0.id == seen }) {
+            start = messages.index(after: i)
+        } else if let lastOwn = messages.lastIndex(where: { $0.kind == .agent && $0.agentID == agentID }) {
+            start = messages.index(after: lastOwn)
+        } else {
+            start = max(messages.startIndex, messages.endIndex - 20)
         }
+        let lines = messages[start...].compactMap { message -> String? in
+            guard !message.text.isEmpty, !message.isStreaming, message.agentID != agentID else { return nil }
+            switch message.kind {
+            case .user: return "[founder]: \(message.text)"
+            case .agent: return "[@\(agent(message.agentID ?? "").name)]: \(message.text)"
+            case .notice: return nil
+            }
+        }
+        var prompt = "New in the group chat since your last turn:\n\n" + lines.joined(separator: "\n\n")
+        if let askedBy {
+            prompt += "\n\n@\(askedBy) addressed you (@\(agent(agentID).name)) above. Answer them directly."
+        }
+        prompt += "\n\nYour turn. Follow the group-chat rules (reply PASS if you have nothing new)."
         return prompt
+    }
+
+    /// Who answers a founder message: explicit @mentions, else a small fast model picks the
+    /// members the message concerns. Falls back to everyone if that fails.
+    private func chooseSpeakers(for userText: String, in conversation: Conversation) async -> [String] {
+        let all = conversation.participants
+        let mentioned = mentions(in: userText, of: all, excluding: nil)
+        if !mentioned.isEmpty { return mentioned }
+
+        phase[conversation.id] = "Choosing who should answer…"
+        defer { phase[conversation.id] = nil }
+        let roster = all.map { "- \(agent($0).name): \(agent($0).description.prefix(240))" }.joined(separator: "\n")
+        let recent = conversation.messages.dropLast().suffix(6)
+            .filter { $0.kind != .notice && !$0.text.isEmpty }
+            .map { "[\($0.kind == .user ? "founder" : agent($0.agentID ?? "").name)]: \($0.text.prefix(500))" }
+            .joined(separator: "\n")
+        let prompt = """
+        You route messages in a founder's group chat with AI team members. Pick only the members whose \
+        area the founder's newest message clearly concerns: usually one, more only if it truly needs each.
+
+        Members:
+        \(roster)
+
+        Recent conversation:
+        \(recent.isEmpty ? "(none)" : recent)
+
+        Founder's newest message:
+        \(userText)
+
+        Reply with only the member names, comma-separated, nothing else.
+        """
+        let request = RunRequest(
+            claudePath: settings.claudePath, prompt: prompt, agent: nil, resumeSessionID: nil,
+            workingDirectory: FileManager.default.temporaryDirectory, permissionMode: "default",
+            model: "haiku", tools: "", persistSession: false
+        )
+        var text = ""
+        do {
+            for try await event in ClaudeRunner.run(request) {
+                if case .text(let chunk) = event { text += chunk }
+            }
+        } catch {
+            return all
+        }
+        let answer = text.lowercased()
+        let picked = all.filter { answer.contains(agent($0).name.lowercased()) }
+        return picked.isEmpty ? all : picked
+    }
+
+    /// Agent ids @mentioned in `text` (by short name, e.g. @lawyer, or plugin, e.g. @ai-lawyer), in order.
+    private func mentions(in text: String, of participants: [String], excluding: String?) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: "@([A-Za-z][A-Za-z0-9_-]*)") else { return [] }
+        let range = NSRange(text.startIndex..., in: text)
+        var found: [String] = []
+        for match in regex.matches(in: text, range: range) {
+            guard let r = Range(match.range(at: 1), in: text) else { continue }
+            let token = text[r].lowercased()
+            if let id = participants.first(where: {
+                agent($0).name.lowercased() == token || agent($0).plugin.lowercased() == token
+            }), id != excluding, !found.contains(id) {
+                found.append(id)
+            }
+        }
+        return found
+    }
+
+    private func markSeen(_ agentID: String, in conversationID: UUID) {
+        store.update(conversationID) { conversation in
+            guard let last = conversation.messages.last?.id else { return }
+            var seen = conversation.lastSeenMessageID ?? [:]
+            seen[agentID] = last
+            conversation.lastSeenMessageID = seen
+        }
+    }
+
+    /// True when an agent chose to stay silent ("PASS", possibly with punctuation or markdown).
+    nonisolated static func isPass(_ text: String) -> Bool {
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "*_`.!\"'"))
+            .uppercased()
+        return cleaned == "PASS"
     }
 }

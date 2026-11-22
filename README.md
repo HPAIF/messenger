@@ -15,9 +15,18 @@ desktop app.
 - **One-to-one chat:** replies stream in as they're written. Tool use shows as short lines
   (`🔧 Read ai-team/lawyer/journal.md`). Each agent keeps its context across messages, and you can
   stop a reply at any time (⌘.).
-- **Group chat:** pick two or more agents. Each of your messages goes to each agent in turn. Every
-  agent also sees what its colleagues replied since its last turn (`[lawyer]: …`), so they can build
-  on each other. Replies are labelled and coloured by agent.
+- **Group chat:** pick two or more agents. Members speak only when they have something to add:
+  - write `@lawyer` (any member's short name) to ask specific members;
+  - otherwise a quick, cheap check (a small model, no tools, not saved) picks the members your
+    message concerns, falling back to everyone if it fails;
+  - a member with nothing new replies `PASS`, which the app hides;
+  - members don't relay questions through you: an agent that needs a colleague writes `@accountant …`
+    and the app gives that colleague a turn (at most 4 agent replies per message);
+  - group rules (no repeating, no "I agree" openers, brief answers) are added to each agent's system
+    prompt, and each agent sees everything said since its last turn, including your messages.
+- **Live status:** while an agent works you see what it is doing ("Reading obligations.md",
+  "Searching the web", "Using legal-research"), then "typing…" while it writes. Raw tool steps are
+  hidden by default (Settings → Messages).
 - **Company folder:** agents run in the folder you choose. The app warns you if there's no
   `ai-team/` workspace in it or in any parent folder.
 - **Local history:** conversations are saved on your Mac and listed in the sidebar.
