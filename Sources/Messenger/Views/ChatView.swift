@@ -1,10 +1,14 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ChatView: View {
     @Environment(AppModel.self) private var model
     let conversationID: UUID
     @State private var draft = ""
     @State private var composerHeight: CGFloat = 20
+    @State private var pendingFiles: [URL] = []
+    @State private var dropTargeted = false
 
     var body: some View {
         if let conversation = model.store.conversation(conversationID) {
@@ -21,6 +25,16 @@ struct ChatView: View {
                 }
                 Divider()
                 composer(isGroup: conversation.isGroup)
+            }
+            .onDrop(of: [.fileURL], isTargeted: $dropTargeted, perform: handleDrop)
+            .overlay {
+                if dropTargeted {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6]))
+                        .overlay(Text("Drop files to attach").font(.headline).foregroundStyle(Color.accentColor))
+                        .padding(8)
+                        .allowsHitTesting(false)
+                }
             }
         }
     }
@@ -78,46 +92,116 @@ struct ChatView: View {
         }
     }
 
+    private var canSend: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingFiles.isEmpty
+    }
+
     private func composer(isGroup: Bool) -> some View {
         let running = model.isRunning(conversationID)
-        return HStack(alignment: .bottom, spacing: 8) {
-            ComposerTextView(text: $draft, height: $composerHeight, onSubmit: send)
-                .frame(height: composerHeight)
-                .overlay(alignment: .topLeading) {
-                    if draft.isEmpty {
-                        Text(isGroup ? "Message  ·  @name to ask one member  ·  Shift+Enter for a new line"
-                                     : "Message  ·  Enter to send, Shift+Enter for a new line")
-                            .foregroundStyle(.tertiary)
-                            .padding(.top, 2)
-                            .allowsHitTesting(false)
+        return VStack(alignment: .leading, spacing: 8) {
+            if !pendingFiles.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(pendingFiles, id: \.self) { url in
+                            HStack(spacing: 4) {
+                                Image(systemName: "doc")
+                                Text(url.lastPathComponent).lineLimit(1)
+                                Button {
+                                    pendingFiles.removeAll { $0 == url }
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                }
+                                .buttonStyle(.plain)
+                                .help("Remove")
+                            }
+                            .font(.caption)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(.quaternary, in: Capsule())
+                        }
                     }
                 }
-                .padding(8)
-                .background(.background, in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator))
-            if running {
-                Button(role: .cancel) { model.stop(conversationID) } label: {
-                    Label("Stop", systemImage: "stop.circle.fill")
+            }
+            HStack(alignment: .bottom, spacing: 8) {
+                Button(action: chooseFiles) {
+                    Image(systemName: "paperclip")
                 }
-                .keyboardShortcut(".", modifiers: .command)
-                .help("Stop the running reply (⌘.)")
-            } else {
-                Button(action: send) {
-                    Label("Send", systemImage: "paperplane.fill")
+                .buttonStyle(.borderless)
+                .help("Attach files (or drop them on the chat)")
+                .padding(.bottom, 8)
+
+                ComposerTextView(text: $draft, height: $composerHeight, onSubmit: send)
+                    .frame(height: composerHeight)
+                    .overlay(alignment: .topLeading) {
+                        if draft.isEmpty {
+                            Text(isGroup ? "Message  ·  @name to ask one member  ·  Shift+Enter for a new line"
+                                         : "Message  ·  Enter to send, Shift+Enter for a new line")
+                                .foregroundStyle(.tertiary)
+                                .padding(.top, 2)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .padding(8)
+                    .background(.background, in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator))
+                if running {
+                    Button(role: .cancel) { model.stop(conversationID) } label: {
+                        Label("Stop", systemImage: "stop.circle.fill")
+                    }
+                    .keyboardShortcut(".", modifiers: .command)
+                    .help("Stop the running reply (⌘.)")
+                } else {
+                    Button(action: send) {
+                        Label("Send", systemImage: "paperplane.fill")
+                    }
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(!canSend)
                 }
-                .keyboardShortcut(.return, modifiers: .command)
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(12)
     }
 
     private func send() {
-        guard !model.isRunning(conversationID) else { return }
-        guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard !model.isRunning(conversationID), canSend else { return }
         let text = draft
+        let files = pendingFiles
         draft = ""
-        model.send(text, in: conversationID)
+        pendingFiles = []
+        model.send(text, files: files, in: conversationID)
+    }
+
+    private func chooseFiles() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Attach"
+        panel.message = "Choose files to attach. They are copied into the messenger; the originals stay where they are."
+        if panel.runModal() == .OK {
+            addFiles(panel.urls)
+        }
+    }
+
+    private func addFiles(_ urls: [URL]) {
+        for url in urls where !pendingFiles.contains(url) {
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue {
+                pendingFiles.append(url)
+            }
+        }
+    }
+
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        var accepted = false
+        for provider in providers where provider.canLoadObject(ofClass: URL.self) {
+            accepted = true
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url, url.isFileURL else { return }
+                Task { @MainActor in addFiles([url]) }
+            }
+        }
+        return accepted
     }
 }
 
@@ -130,11 +214,29 @@ struct MessageBubble: View {
         case .user:
             HStack {
                 Spacer(minLength: 80)
-                Text(message.text)
-                    .textSelection(.enabled)
-                    .padding(10)
-                    .foregroundStyle(.white)
-                    .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 12))
+                VStack(alignment: .trailing, spacing: 6) {
+                    if !message.text.isEmpty {
+                        Text(message.text)
+                            .textSelection(.enabled)
+                            .padding(10)
+                            .foregroundStyle(.white)
+                            .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 12))
+                    }
+                    ForEach(message.attachments ?? []) { file in
+                        Button {
+                            NSWorkspace.shared.open(URL(fileURLWithPath: file.path))
+                        } label: {
+                            Label(file.name, systemImage: "doc.fill")
+                                .font(.callout)
+                                .lineLimit(1)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color.accentColor.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open \(file.name)")
+                    }
+                }
             }
         case .notice:
             Text(message.text)

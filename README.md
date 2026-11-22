@@ -28,6 +28,12 @@ desktop app.
     prompt, and each agent sees everything said since its last turn, including your messages.
 - **Agent rules:** each run can read the plugin cache (`--add-dir ~/.claude/plugins/cache`), so agents
   follow their own RULES.md even in headless mode.
+- **Attachments:** click the paperclip or drop files on the chat. Files are copied into
+  `~/Library/Application Support/HPAIF Messenger/attachments/<conversation>/` (originals untouched),
+  shown as chips on your message (click to open), and passed to the agents as paths they can read.
+  You can send files without text.
+- **Missed questions:** if an agent asked you something you didn't answer and it still matters, it
+  repeats it briefly under "Still open:" in its next reply; in a group, that member gets a turn.
 - **Live status:** while an agent works you see what it is doing ("Reading obligations.md",
   "Searching the web", "Using legal-research"), then "typing…" while it writes. Raw tool steps are
   hidden by default (Settings → Messages).

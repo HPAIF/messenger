@@ -1,5 +1,15 @@
 import Foundation
 
+/// A file the founder attached. The file is copied into the app's attachments folder, so the
+/// original is never moved or changed; agents read the copy.
+struct Attachment: Identifiable, Codable, Hashable, Sendable {
+    var id = UUID()
+    var name: String
+    /// Absolute path of the copy inside the app's attachments folder.
+    var path: String
+    var size: Int64?
+}
+
 struct Message: Identifiable, Codable, Hashable, Sendable {
     enum Kind: String, Codable, Sendable {
         case user    // the founder
@@ -22,7 +32,21 @@ struct Message: Identifiable, Codable, Hashable, Sendable {
     var isStreaming = false
     var wasStopped = false
     var date = Date()
+    /// Files attached to a founder message. Optional so older conversation files still load.
+    var attachments: [Attachment]?
 
-    static func user(_ text: String) -> Message { Message(kind: .user, text: text) }
+    static func user(_ text: String, attachments: [Attachment] = []) -> Message {
+        var message = Message(kind: .user, text: text)
+        message.attachments = attachments.isEmpty ? nil : attachments
+        return message
+    }
+
+    /// Text for an agent prompt: the message plus the paths of its attachments.
+    var promptText: String {
+        guard let attachments, !attachments.isEmpty else { return text }
+        let list = attachments.map { "- \($0.name): \($0.path)" }.joined(separator: "\n")
+        let lead = text.isEmpty ? "" : text + "\n\n"
+        return lead + "Attached files (read them with the Read tool; the originals stay with the founder):\n" + list
+    }
     static func notice(_ text: String) -> Message { Message(kind: .notice, text: text) }
 }

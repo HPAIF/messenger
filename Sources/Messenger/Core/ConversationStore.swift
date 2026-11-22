@@ -15,6 +15,12 @@ final class ConversationStore {
             .appending(path: "conversations", directoryHint: .isDirectory)
     }
 
+    /// Copies of attached files: `.../HPAIF Messenger/attachments/<conversation id>/`.
+    nonisolated static var attachmentsRoot: URL {
+        defaultDirectory.deletingLastPathComponent()
+            .appending(path: "attachments", directoryHint: .isDirectory)
+    }
+
     init(directory: URL = ConversationStore.defaultDirectory) {
         self.directory = directory
         load()
@@ -47,6 +53,39 @@ final class ConversationStore {
     func delete(_ id: UUID) {
         conversations.removeAll { $0.id == id }
         try? FileManager.default.removeItem(at: fileURL(for: id))
+        try? FileManager.default.removeItem(at: Self.attachmentsRoot.appending(path: id.uuidString))
+    }
+
+    /// Copies files into this conversation's attachments folder (never moves the originals).
+    /// A name that already exists gets a number: `invoice 2.pdf`.
+    func importAttachments(_ urls: [URL], to conversationID: UUID) -> (attachments: [Attachment], failed: [String]) {
+        let fm = FileManager.default
+        let folder = Self.attachmentsRoot.appending(path: conversationID.uuidString, directoryHint: .isDirectory)
+        var attachments: [Attachment] = []
+        var failed: [String] = []
+        do {
+            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        } catch {
+            return ([], urls.map(\.lastPathComponent))
+        }
+        for url in urls {
+            let base = url.deletingPathExtension().lastPathComponent
+            let ext = url.pathExtension
+            var target = folder.appending(path: url.lastPathComponent)
+            var n = 2
+            while fm.fileExists(atPath: target.path) {
+                target = folder.appending(path: ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)")
+                n += 1
+            }
+            do {
+                try fm.copyItem(at: url, to: target)
+                let size = (try? fm.attributesOfItem(atPath: target.path)[.size] as? NSNumber)?.int64Value
+                attachments.append(Attachment(name: target.lastPathComponent, path: target.path, size: size))
+            } catch {
+                failed.append(url.lastPathComponent)
+            }
+        }
+        return (attachments, failed)
     }
 
     // MARK: - Files

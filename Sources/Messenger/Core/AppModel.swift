@@ -94,12 +94,21 @@ final class AppModel {
 
     // MARK: - Sending
 
-    func send(_ rawText: String, in conversationID: UUID) {
+    func send(_ rawText: String, files: [URL] = [], in conversationID: UUID) {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isRunning(conversationID),
+        guard !text.isEmpty || !files.isEmpty, !isRunning(conversationID),
               var conversation = store.conversation(conversationID) else { return }
 
-        store.update(conversationID) { $0.messages.append(.user(text)) }
+        let imported = store.importAttachments(files, to: conversationID)
+        let message = Message.user(text, attachments: imported.attachments)
+        store.update(conversationID) { $0.messages.append(message) }
+        if !imported.failed.isEmpty {
+            store.update(conversationID) {
+                $0.messages.append(.notice("Could not attach: \(imported.failed.joined(separator: ", "))"))
+            }
+        }
+        guard !text.isEmpty || !imported.attachments.isEmpty else { return }
+        let promptText = message.promptText
 
         if conversation.workspacePath == nil, !settings.workspacePath.isEmpty {
             conversation.workspacePath = settings.workspacePath
@@ -115,7 +124,7 @@ final class AppModel {
         }
 
         runningTasks[conversationID] = Task {
-            await runRound(conversationID: conversationID, userText: text, workspace: URL(fileURLWithPath: workspace))
+            await runRound(conversationID: conversationID, userText: promptText, workspace: URL(fileURLWithPath: workspace))
             runningTasks[conversationID] = nil
         }
     }
@@ -181,6 +190,7 @@ final class AppModel {
         guard let conversation = store.conversation(conversationID) else { return nil }
         let reply = Message(kind: .agent, agentID: agentID, isStreaming: true)
         store.update(conversationID) { $0.messages.append(reply) }
+        try? FileManager.default.createDirectory(at: ConversationStore.attachmentsRoot, withIntermediateDirectories: true)
         let request = RunRequest(
             claudePath: settings.claudePath,
             prompt: prompt,
@@ -190,7 +200,7 @@ final class AppModel {
             permissionMode: settings.permissionMode,
             appendSystemPrompt: systemPrompt,
             // Agents read their own rules from the plugin cache, outside the company folder.
-            additionalDirectories: [Self.pluginCacheDirectory]
+            additionalDirectories: [Self.pluginCacheDirectory, ConversationStore.attachmentsRoot.path]
         )
         await run(request, conversationID: conversationID, messageID: reply.id, agentID: agentID)
         guard let message = store.conversation(conversationID)?.messages.first(where: { $0.id == reply.id }),
@@ -283,6 +293,10 @@ final class AppModel {
         4. Ask the founder only questions from your own area: at most two, the most important first.
         5. Be brief: a few lines unless the content truly needs more. Keep warnings (UNVERIFIED, \
         escalation), numbers, dates and decisions the founder must make.
+        6. If you asked the founder something earlier that is still unanswered and still matters, \
+        repeat it briefly at the end under "Still open:". Only your own questions; drop them once \
+        answered or no longer relevant. A missed question alone is reason enough to speak.
+        7. Attached files are listed with their paths; read the ones relevant to your area.
         """
     }
 
@@ -302,7 +316,9 @@ final class AppModel {
         brief. Run it in the foreground and wait for their answer in the same turn: never send the \
         founder an interim "waiting for the lawyer" message. Then give one combined answer that keeps \
         their caveats and says which part is theirs. If the needed colleague is not installed, say \
-        which plugin covers it.
+        which plugin covers it. If you asked the founder something earlier that is still unanswered \
+        and still matters, repeat it briefly at the end under "Still open:". Attached files are \
+        listed with their paths; read them with the Read tool.
         """
     }
 
@@ -320,9 +336,9 @@ final class AppModel {
             start = max(messages.startIndex, messages.endIndex - 20)
         }
         let lines = messages[start...].compactMap { message -> String? in
-            guard !message.text.isEmpty, !message.isStreaming, message.agentID != agentID else { return nil }
+            guard !message.promptText.isEmpty, !message.isStreaming, message.agentID != agentID else { return nil }
             switch message.kind {
-            case .user: return "[founder]: \(message.text)"
+            case .user: return "[founder]: \(message.promptText)"
             case .agent: return "[@\(agent(message.agentID ?? "").name)]: \(message.text)"
             case .notice: return nil
             }
@@ -351,7 +367,8 @@ final class AppModel {
             .joined(separator: "\n")
         let prompt = """
         You route messages in a founder's group chat with AI team members. Pick only the members whose \
-        area the founder's newest message clearly concerns: usually one, more only if it truly needs each.
+        area the founder's newest message clearly concerns: usually one, more only if it truly needs each. \
+        Also pick a member whose question to the founder in the recent conversation is still unanswered.
 
         Members:
         \(roster)
