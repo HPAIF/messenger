@@ -138,6 +138,14 @@ struct MessageBubble: View {
         }
     }
 
+    /// Progress line while a reply streams. With tool steps hidden it only counts them.
+    private var statusLine: String {
+        if !message.text.isEmpty { return "Writing…" }
+        let steps = message.activity.count
+        if steps == 0 || model.settings.showToolSteps { return "Thinking…" }
+        return steps == 1 ? "Working… (1 step)" : "Working… (\(steps) steps)"
+    }
+
     private var agentBubble: some View {
         let agent = model.agent(message.agentID ?? "")
         return HStack(alignment: .top, spacing: 8) {
@@ -145,7 +153,7 @@ struct MessageBubble: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(agent.title).font(.caption.bold()).foregroundStyle(agent.color)
 
-                if !message.activity.isEmpty {
+                if model.settings.showToolSteps && !message.activity.isEmpty {
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(Array(message.activity.enumerated()), id: \.offset) { _, line in
                             Text(line).lineLimit(1)
@@ -163,7 +171,7 @@ struct MessageBubble: View {
                 if message.isStreaming {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
-                        Text(message.text.isEmpty ? "Thinking…" : "Writing…")
+                        Text(statusLine)
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }

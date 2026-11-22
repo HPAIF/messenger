@@ -49,6 +49,13 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Messages") {
+                Toggle("Show agent tool steps above replies", isOn: $settings.showToolSteps)
+                Text("Off: replies show only the answer, with a short \"Working… (n steps)\" while the agent works. On: each step (\"🔧 Read …\") is listed above the reply.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Data") {
                 HStack {
                     Text("Conversations are stored only on this Mac.").font(.caption).foregroundStyle(.secondary)

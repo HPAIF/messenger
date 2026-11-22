@@ -34,8 +34,13 @@ final class AppSettings {
     var permissionMode: String {
         didSet { defaults.set(permissionMode, forKey: "permissionMode") }
     }
+    /// Show the agent's tool steps ("🔧 Read …") above its reply. Off by default.
+    var showToolSteps: Bool {
+        didSet { defaults.set(showToolSteps, forKey: "showToolSteps") }
+    }
 
     init() {
+        showToolSteps = defaults.bool(forKey: "showToolSteps")
         claudePath = defaults.string(forKey: "claudePath") ?? ""
         workspacePath = defaults.string(forKey: "workspacePath") ?? ""
         let mode = defaults.string(forKey: "permissionMode") ?? "default"
