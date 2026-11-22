@@ -1,0 +1,90 @@
+import Foundation
+import Observation
+
+/// Keeps conversations in memory and saves each one as JSON in
+/// `~/Library/Application Support/HPAIF Messenger/conversations/<id>.json`.
+@MainActor
+@Observable
+final class ConversationStore {
+    private(set) var conversations: [Conversation] = []
+    let directory: URL
+
+    static var defaultDirectory: URL {
+        URL.applicationSupportDirectory
+            .appending(path: "HPAIF Messenger", directoryHint: .isDirectory)
+            .appending(path: "conversations", directoryHint: .isDirectory)
+    }
+
+    init(directory: URL = ConversationStore.defaultDirectory) {
+        self.directory = directory
+        load()
+    }
+
+    var sorted: [Conversation] {
+        conversations.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    func conversation(_ id: UUID) -> Conversation? {
+        conversations.first { $0.id == id }
+    }
+
+    func add(_ conversation: Conversation) {
+        conversations.append(conversation)
+        save(conversation)
+    }
+
+    /// Changes a conversation in place. Pass `persist: false` for high-frequency updates
+    /// (streamed text) and save once the reply is complete.
+    func update(_ id: UUID, persist: Bool = true, _ change: (inout Conversation) -> Void) {
+        guard let index = conversations.firstIndex(where: { $0.id == id }) else { return }
+        change(&conversations[index])
+        if persist {
+            conversations[index].updatedAt = Date()
+            save(conversations[index])
+        }
+    }
+
+    func delete(_ id: UUID) {
+        conversations.removeAll { $0.id == id }
+        try? FileManager.default.removeItem(at: fileURL(for: id))
+    }
+
+    // MARK: - Files
+
+    private func fileURL(for id: UUID) -> URL {
+        directory.appending(path: "\(id.uuidString).json")
+    }
+
+    private func load() {
+        let fm = FileManager.default
+        let files = (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        conversations = files
+            .filter { $0.pathExtension == "json" }
+            .compactMap { try? decoder.decode(Conversation.self, from: Data(contentsOf: $0)) }
+            .map(Self.closeInterruptedReplies)
+    }
+
+    private func save(_ conversation: Conversation) {
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(conversation).write(to: fileURL(for: conversation.id), options: .atomic)
+        } catch {
+            NSLog("HPAIF Messenger: could not save conversation: \(error)")
+        }
+    }
+
+    /// A reply that was streaming when the app quit can never finish.
+    private static func closeInterruptedReplies(_ conversation: Conversation) -> Conversation {
+        var copy = conversation
+        for index in copy.messages.indices where copy.messages[index].isStreaming {
+            copy.messages[index].isStreaming = false
+            copy.messages[index].wasStopped = true
+        }
+        return copy
+    }
+}
