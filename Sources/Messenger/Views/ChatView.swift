@@ -4,6 +4,7 @@ struct ChatView: View {
     @Environment(AppModel.self) private var model
     let conversationID: UUID
     @State private var draft = ""
+    @State private var composerHeight: CGFloat = 20
 
     var body: some View {
         if let conversation = model.store.conversation(conversationID) {
@@ -73,13 +74,19 @@ struct ChatView: View {
     private var composer: some View {
         let running = model.isRunning(conversationID)
         return HStack(alignment: .bottom, spacing: 8) {
-            TextField("Message", text: $draft, axis: .vertical)
-                .textFieldStyle(.plain)
-                .lineLimit(1...8)
+            ComposerTextView(text: $draft, height: $composerHeight, onSubmit: send)
+                .frame(height: composerHeight)
+                .overlay(alignment: .topLeading) {
+                    if draft.isEmpty {
+                        Text("Message  ·  Enter to send, Shift+Enter for a new line")
+                            .foregroundStyle(.tertiary)
+                            .padding(.top, 2)
+                            .allowsHitTesting(false)
+                    }
+                }
                 .padding(8)
                 .background(.background, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator))
-                .onSubmit(send)
             if running {
                 Button(role: .cancel) { model.stop(conversationID) } label: {
                     Label("Stop", systemImage: "stop.circle.fill")
@@ -99,6 +106,7 @@ struct ChatView: View {
 
     private func send() {
         guard !model.isRunning(conversationID) else { return }
+        guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let text = draft
         draft = ""
         model.send(text, in: conversationID)
