@@ -22,8 +22,12 @@ desktop app.
   - a member with nothing new replies `PASS`, which the app hides;
   - members don't relay questions through you: an agent that needs a colleague writes `@accountant …`
     and the app gives that colleague a turn (at most 4 agent replies per message);
+  - in one-to-one chats the agent consults installed colleagues itself (Agent tool) and gives you one
+    combined answer, never "ask the lawyer";
   - group rules (no repeating, no "I agree" openers, brief answers) are added to each agent's system
     prompt, and each agent sees everything said since its last turn, including your messages.
+- **Agent rules:** each run can read the plugin cache (`--add-dir ~/.claude/plugins/cache`), so agents
+  follow their own RULES.md even in headless mode.
 - **Live status:** while an agent works you see what it is doing ("Reading obligations.md",
   "Searching the web", "Using legal-research"), then "typing…" while it writes. Raw tool steps are
   hidden by default (Settings → Messages).

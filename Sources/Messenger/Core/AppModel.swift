@@ -21,6 +21,9 @@ final class AppModel {
     var phase: [UUID: String] = [:]
     /// Most agent replies to one founder message (agents can @mention each other).
     static let maxAgentTurnsPerMessage = 4
+    /// Where Claude Code keeps installed plugins (each agent's RULES.md, skills, templates).
+    static let pluginCacheDirectory = FileManager.default.homeDirectoryForCurrentUser
+        .appending(path: ".claude/plugins/cache").path
 
     init() {
         reloadAgents()
@@ -132,7 +135,7 @@ final class AppModel {
         guard let conversation = store.conversation(conversationID),
               let first = conversation.participants.first else { return }
         guard conversation.isGroup else {
-            _ = await runTurn(agentID: first, prompt: userText, systemPrompt: nil,
+            _ = await runTurn(agentID: first, prompt: userText, systemPrompt: directRules(for: first),
                               conversationID: conversationID, workspace: workspace)
             return
         }
@@ -185,7 +188,9 @@ final class AppModel {
             resumeSessionID: conversation.sessionIDs[agentID],
             workingDirectory: workspace,
             permissionMode: settings.permissionMode,
-            appendSystemPrompt: systemPrompt
+            appendSystemPrompt: systemPrompt,
+            // Agents read their own rules from the plugin cache, outside the company folder.
+            additionalDirectories: [Self.pluginCacheDirectory]
         )
         await run(request, conversationID: conversationID, messageID: reply.id, agentID: agentID)
         guard let message = store.conversation(conversationID)?.messages.first(where: { $0.id == reply.id }),
@@ -271,12 +276,33 @@ final class AppModel {
         to add, reply with exactly: PASS
         2. Never repeat, summarise or agree with what a colleague already said. No openers such as \
         "Thanks", "Understood", "I agree", "Got it".
-        3. Never tell the founder what to ask or answer a colleague, and never ask questions on a \
-        colleague's behalf. If you need a colleague's input, write @name and your question in your \
-        message; the app gives that colleague a turn.
+        3. Talk to colleagues directly, never through the founder. Never write things like "ask the \
+        lawyer", "check this with the accountant", "when you answer X, also tell me" or "X will tell \
+        you". If you need a colleague's input, write @name and your question in your message; the app \
+        gives that colleague a turn right away and they answer you in this chat.
         4. Ask the founder only questions from your own area: at most two, the most important first.
         5. Be brief: a few lines unless the content truly needs more. Keep warnings (UNVERIFIED, \
         escalation), numbers, dates and decisions the founder must make.
+        """
+    }
+
+    /// Instructions for a one-to-one chat: consult installed colleagues yourself, never send
+    /// the founder to them.
+    private func directRules(for agentID: String) -> String {
+        let me = agent(agentID)
+        let colleagues = agents.filter { $0.id != agentID && $0.marketplace == me.marketplace }
+        let list = colleagues.isEmpty
+            ? "none installed"
+            : colleagues.map { "\($0.title) (subagent_type \($0.id))" }.joined(separator: ", ")
+        return """
+        You are \(me.title) in a one-to-one chat with the founder in HPAIF Messenger. Installed AI Team \
+        colleagues: \(list). Never tell the founder to ask, check with or forward anything to a \
+        colleague (no "ask the lawyer", "check with the accountant"). When you need a colleague's \
+        input, consult them yourself with the Agent tool (use the subagent_type above) with a short \
+        brief. Run it in the foreground and wait for their answer in the same turn: never send the \
+        founder an interim "waiting for the lawyer" message. Then give one combined answer that keeps \
+        their caveats and says which part is theirs. If the needed colleague is not installed, say \
+        which plugin covers it.
         """
     }
 

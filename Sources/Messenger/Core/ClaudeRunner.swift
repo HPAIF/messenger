@@ -16,6 +16,8 @@ struct RunRequest: Sendable {
     var tools: String?
     /// false = don't save this run as a session (one-off calls such as the router).
     var persistSession = true
+    /// Extra folders the agent may read (e.g. the plugin cache that holds each agent's RULES.md).
+    var additionalDirectories: [String] = []
 
     var arguments: [String] {
         var args = [
@@ -32,6 +34,7 @@ struct RunRequest: Sendable {
         if let model { args += ["--model", model] }
         if let tools { args += ["--tools", tools] }
         if !persistSession { args.append("--no-session-persistence") }
+        for dir in additionalDirectories { args += ["--add-dir", dir] }
         args += ["--", prompt]                 // `--` so a message starting with "-" is not an option
         return args
     }
