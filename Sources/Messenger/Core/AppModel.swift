@@ -144,13 +144,28 @@ final class AppModel {
         guard let conversation = store.conversation(conversationID),
               let first = conversation.participants.first else { return }
         guard conversation.isGroup else {
-            _ = await runTurn(agentID: first, prompt: userText, systemPrompt: directRules(for: first),
-                              conversationID: conversationID, workspace: workspace)
+            let reply = await runTurn(agentID: first, prompt: userText, systemPrompt: directRules(for: first),
+                                      conversationID: conversationID, workspace: workspace)
+            if let reply {
+                let colleagues = agents.map(\.id).filter { $0 != first && agent($0).marketplace == agent(first).marketplace }
+                let addressed = mentions(in: reply.text, of: colleagues, excluding: first)
+                if !addressed.isEmpty {
+                    var notice = Message.notice("\(agent(first).title) needs input from \(addressed.map { agent($0).title }.joined(separator: " and ")).")
+                    notice.inviteAgentIDs = addressed
+                    notice.invitedBy = first
+                    store.update(conversationID) { $0.messages.append(notice) }
+                }
+            }
             return
         }
 
         var queue = await chooseSpeakers(for: userText, in: conversation)
         var askedBy: [String: String] = [:]   // agent id -> name of the colleague who @mentioned it
+        // One hop only: members chosen for the founder's message may @mention a colleague, who
+        // answers once in the chat; that answer does not start another round (no discussion
+        // without the founder).
+        var depth: [String: Int] = Dictionary(uniqueKeysWithValues: queue.map { ($0, 0) })
+        var waiting: [String] = []
         var turns = 0
         while !queue.isEmpty, turns < Self.maxAgentTurnsPerMessage, !Task.isCancelled {
             let agentID = queue.removeFirst()
@@ -170,16 +185,69 @@ final class AppModel {
                 continue
             }
             askedBy[agentID] = nil
+            let myDepth = depth[agentID] ?? 0
             for mentioned in mentions(in: reply.text, of: current.participants, excluding: agentID)
             where !queue.contains(mentioned) {
-                queue.append(mentioned)
-                askedBy[mentioned] = agent(agentID).name
+                if myDepth == 0 {
+                    queue.append(mentioned)
+                    depth[mentioned] = 1
+                    askedBy[mentioned] = agent(agentID).name
+                } else if !waiting.contains(mentioned) {
+                    waiting.append(mentioned)
+                }
             }
         }
-        if !queue.isEmpty, !Task.isCancelled {
-            let names = queue.map { "@" + agent($0).name }.joined(separator: ", ")
+        let pending = (queue + waiting).filter { !$0.isEmpty }
+        if !pending.isEmpty, !Task.isCancelled {
+            let names = pending.map { "@" + agent($0).name }.joined(separator: ", ")
             store.update(conversationID) {
-                $0.messages.append(.notice("Paused after \(Self.maxAgentTurnsPerMessage) replies. \(names) was asked something; send a message to continue."))
+                $0.messages.append(.notice("\(names) was asked something. Reply when you want them to answer."))
+            }
+        }
+    }
+
+    /// Adds colleagues an agent addressed in a one-to-one chat to that conversation (the founder
+    /// clicked the button), then lets each answer once, visibly. The chat becomes a group chat.
+    func invite(_ agentIDs: [String], fromNotice noticeID: UUID, in conversationID: UUID) {
+        guard !isRunning(conversationID), let conversation = store.conversation(conversationID),
+              let workspace = conversation.workspacePath else { return }
+        let asker = conversation.messages.first { $0.id == noticeID }?.invitedBy
+        let newcomers = agentIDs.filter { !conversation.participants.contains($0) }
+        store.update(conversationID) { conv in
+            let wasAutoTitle = conv.title == self.agent(conv.participants.first ?? "").title
+            conv.participants += newcomers
+            if wasAutoTitle { conv.title = conv.participants.map { self.agent($0).name.capitalized }.joined(separator: ", ") }
+            if let i = conv.messages.firstIndex(where: { $0.id == noticeID }) {
+                conv.messages[i].inviteAgentIDs = nil
+                conv.messages[i].text += " Added to this chat."
+            }
+        }
+        runningTasks[conversationID] = Task {
+            for agentID in newcomers where !Task.isCancelled {
+                guard let current = store.conversation(conversationID) else { break }
+                let reply = await runTurn(
+                    agentID: agentID,
+                    prompt: groupPrompt(for: agentID, in: current, askedBy: asker.map { agent($0).name }),
+                    systemPrompt: groupRules(for: agentID, in: current),
+                    conversationID: conversationID,
+                    workspace: URL(fileURLWithPath: workspace)
+                )
+                markSeen(agentID, in: conversationID)
+                if let reply, Self.isPass(reply.text) {
+                    store.update(conversationID) { $0.messages.removeAll { $0.id == reply.id } }
+                }
+            }
+            runningTasks[conversationID] = nil
+        }
+    }
+
+    /// Marks messages as seen by the founder (they were on screen while the app was active).
+    func markRead(_ ids: Set<UUID>, in conversationID: UUID) {
+        guard let conversation = store.conversation(conversationID),
+              conversation.messages.contains(where: { ids.contains($0.id) && $0.isRead == false }) else { return }
+        store.update(conversationID) { conv in
+            for i in conv.messages.indices where ids.contains(conv.messages[i].id) && conv.messages[i].isRead == false {
+                conv.messages[i].isRead = true
             }
         }
     }
@@ -188,7 +256,8 @@ final class AppModel {
     private func runTurn(agentID: String, prompt: String, systemPrompt: String?,
                          conversationID: UUID, workspace: URL) async -> (id: UUID, text: String)? {
         guard let conversation = store.conversation(conversationID) else { return nil }
-        let reply = Message(kind: .agent, agentID: agentID, isStreaming: true)
+        var reply = Message(kind: .agent, agentID: agentID, isStreaming: true)
+        reply.isRead = false
         store.update(conversationID) { $0.messages.append(reply) }
         try? FileManager.default.createDirectory(at: ConversationStore.attachmentsRoot, withIntermediateDirectories: true)
         let request = RunRequest(
@@ -200,7 +269,9 @@ final class AppModel {
             permissionMode: settings.permissionMode,
             appendSystemPrompt: systemPrompt,
             // Agents read their own rules from the plugin cache, outside the company folder.
-            additionalDirectories: [Self.pluginCacheDirectory, ConversationStore.attachmentsRoot.path]
+            additionalDirectories: [Self.pluginCacheDirectory, ConversationStore.attachmentsRoot.path],
+            // No hidden agent-to-agent calls: colleagues talk only in the chat the founder sees.
+            disallowedTools: ["Agent", "Task"]
         )
         await run(request, conversationID: conversationID, messageID: reply.id, agentID: agentID)
         guard let message = store.conversation(conversationID)?.messages.first(where: { $0.id == reply.id }),
@@ -286,10 +357,11 @@ final class AppModel {
         to add, reply with exactly: PASS
         2. Never repeat, summarise or agree with what a colleague already said. No openers such as \
         "Thanks", "Understood", "I agree", "Got it".
-        3. Talk to colleagues directly, never through the founder. Never write things like "ask the \
-        lawyer", "check this with the accountant", "when you answer X, also tell me" or "X will tell \
-        you". If you need a colleague's input, write @name and your question in your message; the app \
-        gives that colleague a turn right away and they answer you in this chat.
+        3. Talk to colleagues only here, where the founder reads it, never through the founder and \
+        never through hidden channels (no Agent tool or subagents to reach colleagues). Don't write \
+        "ask the lawyer" or "check this with the accountant": write @name and your question; that \
+        colleague answers once in this chat. Ask once, then leave the next step to the founder: no \
+        back-and-forth discussion among yourselves.
         4. Ask the founder only questions from your own area: at most two, the most important first.
         5. Be brief: a few lines unless the content truly needs more. Keep warnings (UNVERIFIED, \
         escalation), numbers, dates and decisions the founder must make.
@@ -305,20 +377,16 @@ final class AppModel {
     private func directRules(for agentID: String) -> String {
         let me = agent(agentID)
         let colleagues = agents.filter { $0.id != agentID && $0.marketplace == me.marketplace }
-        let list = colleagues.isEmpty
-            ? "none installed"
-            : colleagues.map { "\($0.title) (subagent_type \($0.id))" }.joined(separator: ", ")
+        let list = colleagues.isEmpty ? "none installed" : colleagues.map { "@\($0.name)" }.joined(separator: ", ")
         return """
-        You are \(me.title) in a one-to-one chat with the founder in HPAIF Messenger. Installed AI Team \
-        colleagues: \(list). Never tell the founder to ask, check with or forward anything to a \
-        colleague (no "ask the lawyer", "check with the accountant"). When you need a colleague's \
-        input, consult them yourself with the Agent tool (use the subagent_type above) with a short \
-        brief. Run it in the foreground and wait for their answer in the same turn: never send the \
-        founder an interim "waiting for the lawyer" message. Then give one combined answer that keeps \
-        their caveats and says which part is theirs. If the needed colleague is not installed, say \
-        which plugin covers it. If you asked the founder something earlier that is still unanswered \
-        and still matters, repeat it briefly at the end under "Still open:". Attached files are \
-        listed with their paths; read them with the Read tool.
+        You are \(me.title) in a one-to-one chat with the founder in HPAIF Messenger. Colleagues the \
+        founder can bring into this chat: \(list). Never contact colleagues through hidden channels \
+        (no Agent tool or subagents): the founder must see every exchange. Never tell the founder to \
+        ask or check with a colleague either. Answer your own part; if a colleague's input is needed, \
+        end with one line per colleague: "For @name: <the exact question>". The founder can then add \
+        them to this chat with one click. If you asked the founder something earlier that is still \
+        unanswered and still matters, repeat it briefly at the end under "Still open:". Attached files \
+        are listed with their paths; read them with the Read tool.
         """
     }
 
@@ -368,7 +436,8 @@ final class AppModel {
         let prompt = """
         You route messages in a founder's group chat with AI team members. Pick only the members whose \
         area the founder's newest message clearly concerns: usually one, more only if it truly needs each. \
-        Also pick a member whose question to the founder in the recent conversation is still unanswered.
+        Also pick a member whose question to the founder in the recent conversation is still unanswered, \
+        and a member a colleague asked something (@name) that they have not answered yet.
 
         Members:
         \(roster)

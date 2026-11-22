@@ -18,6 +18,8 @@ struct RunRequest: Sendable {
     var persistSession = true
     /// Extra folders the agent may read (e.g. the plugin cache that holds each agent's RULES.md).
     var additionalDirectories: [String] = []
+    /// Tools the agent may not use (the messenger blocks hidden agent-to-agent calls).
+    var disallowedTools: [String] = []
 
     var arguments: [String] {
         var args = [
@@ -35,6 +37,7 @@ struct RunRequest: Sendable {
         if let tools { args += ["--tools", tools] }
         if !persistSession { args.append("--no-session-persistence") }
         for dir in additionalDirectories { args += ["--add-dir", dir] }
+        if !disallowedTools.isEmpty { args += ["--disallowedTools", disallowedTools.joined(separator: ",")] }
         args += ["--", prompt]                 // `--` so a message starting with "-" is not an option
         return args
     }

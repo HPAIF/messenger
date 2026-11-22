@@ -18,6 +18,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     var updatedAt = Date()
 
     var isGroup: Bool { participants.count > 1 }
+    var unreadCount: Int { messages.filter(\.isUnread).count }
+    var firstUnreadID: UUID? { messages.first(where: \.isUnread)?.id }
 
     var preview: String {
         guard let last = messages.last(where: { $0.kind != .notice }) else { return "No messages yet" }

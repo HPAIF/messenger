@@ -9,6 +9,9 @@ struct ChatView: View {
     @State private var composerHeight: CGFloat = 20
     @State private var pendingFiles: [URL] = []
     @State private var dropTargeted = false
+    /// Follow new text only while the founder is at the bottom (like a messenger).
+    @State private var pinnedToBottom = true
+    @State private var visibleIDs: Set<UUID> = []
 
     var body: some View {
         if let conversation = model.store.conversation(conversationID) {
@@ -67,29 +70,102 @@ struct ChatView: View {
 
     private func messages(_ conversation: Conversation) -> some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    if conversation.messages.isEmpty {
-                        Text(conversation.isGroup
-                             ? "Members answer only when your message concerns them. Write @name to ask one member directly; they can @mention each other too."
-                             : "Say hello to \(model.agent(conversation.participants.first ?? "").title).")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 40)
+            ZStack(alignment: .bottomTrailing) {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 14) {
+                        if conversation.messages.isEmpty {
+                            Text(conversation.isGroup
+                                 ? "Members answer only when your message concerns them. Write @name to ask one member directly; they can @mention each other too."
+                                 : "Say hello to \(model.agent(conversation.participants.first ?? "").title).")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 40)
+                        }
+                        ForEach(conversation.messages) { message in
+                            MessageBubble(message: message, conversationID: conversationID)
+                                .id(message.id)
+                                .modifier(VisibilityTracker { visible in
+                                    if visible { visibleIDs.insert(message.id) } else { visibleIDs.remove(message.id) }
+                                    if visible { markVisibleRead() }
+                                })
+                        }
+                        Color.clear.frame(height: 1).id("bottom")
+                            .modifier(VisibilityTracker { visible in
+                                if #unavailable(macOS 15.0) { pinnedToBottom = visible }
+                            })
                     }
-                    ForEach(conversation.messages) { message in
-                        MessageBubble(message: message)
-                    }
-                    Color.clear.frame(height: 1).id("bottom")
+                    .padding(16)
                 }
-                .padding(16)
+                .modifier(BottomPinTracker(pinned: $pinnedToBottom))
+                .onAppear { initialScroll(conversation, proxy) }
+                .onChange(of: conversation.messages.count) {
+                    if conversation.messages.last?.kind == .user {
+                        pinnedToBottom = true   // the founder just sent: follow the conversation
+                        scrollToBottom(proxy)
+                    } else if pinnedToBottom {
+                        scrollToBottom(proxy)
+                    }
+                }
+                .onChange(of: conversation.messages.last?.text) { if pinnedToBottom { scrollToBottom(proxy) } }
+                .onChange(of: conversation.messages.last?.status) { if pinnedToBottom { scrollToBottom(proxy) } }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                    markVisibleRead()
+                }
+
+                if !pinnedToBottom {
+                    jumpButton(conversation, proxy)
+                        .padding(16)
+                }
             }
-            .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
-            .onChange(of: conversation.messages.count) { proxy.scrollTo("bottom", anchor: .bottom) }
-            .onChange(of: conversation.messages.last?.text) { proxy.scrollTo("bottom", anchor: .bottom) }
-            .onChange(of: conversation.messages.last?.status) { proxy.scrollTo("bottom", anchor: .bottom) }
         }
+    }
+
+    /// "↓" (with the unread count when there is one) — jumps to the first unread, else the bottom.
+    private func jumpButton(_ conversation: Conversation, _ proxy: ScrollViewProxy) -> some View {
+        let unread = conversation.unreadCount
+        return Button {
+            if let first = conversation.firstUnreadID, !visibleIDs.contains(first) {
+                withAnimation { proxy.scrollTo(first, anchor: .top) }
+            } else {
+                pinnedToBottom = true
+                withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.down")
+                if unread > 0 { Text("\(unread)").font(.caption.bold()) }
+            }
+            .foregroundStyle(unread > 0 ? Color.white : Color.primary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(unread > 0 ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.regularMaterial), in: Capsule())
+            .shadow(radius: 2, y: 1)
+        }
+        .buttonStyle(.plain)
+        .help(unread > 0 ? "\(unread) unread" : "Jump to the latest message")
+    }
+
+    private func initialScroll(_ conversation: Conversation, _ proxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            if let first = conversation.firstUnreadID {
+                pinnedToBottom = false
+                proxy.scrollTo(first, anchor: .top)
+            } else {
+                pinnedToBottom = true
+                proxy.scrollTo("bottom", anchor: .bottom)
+            }
+        }
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        proxy.scrollTo("bottom", anchor: .bottom)
+    }
+
+    /// Messages count as read once they are on screen while the app is active.
+    private func markVisibleRead() {
+        guard NSApp.isActive, !visibleIDs.isEmpty else { return }
+        model.markRead(visibleIDs, in: conversationID)
     }
 
     private var canSend: Bool {
@@ -208,6 +284,7 @@ struct ChatView: View {
 struct MessageBubble: View {
     @Environment(AppModel.self) private var model
     let message: Message
+    var conversationID: UUID? = nil
 
     var body: some View {
         switch message.kind {
@@ -239,10 +316,23 @@ struct MessageBubble: View {
                 }
             }
         case .notice:
-            Text(message.text)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity)
+            VStack(spacing: 6) {
+                Text(message.text)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let invites = message.inviteAgentIDs, !invites.isEmpty, let conversationID {
+                    HStack(spacing: 8) {
+                        ForEach(invites, id: \.self) { id in
+                            Button("Add \(model.agent(id).title) to this chat") {
+                                model.invite([id], fromNotice: message.id, in: conversationID)
+                            }
+                            .controlSize(.small)
+                            .disabled(model.isRunning(conversationID))
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity)
         case .agent:
             agentBubble
         }
@@ -348,6 +438,39 @@ struct TypingIndicator: View {
                         .opacity(i == step ? 1 : 0.3)
                 }
             }
+        }
+    }
+}
+
+/// Reports when a view scrolls into or out of view (macOS 15+: only when really on screen).
+struct VisibilityTracker: ViewModifier {
+    let onChange: (Bool) -> Void
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.onScrollVisibilityChange(threshold: 0.15) { onChange($0) }
+        } else {
+            content.onAppear { onChange(true) }.onDisappear { onChange(false) }
+        }
+    }
+}
+
+/// Keeps `pinned` true while the founder is at the bottom. Only the founder's own scrolling can
+/// unpin; new content growing below never does (macOS 15+).
+struct BottomPinTracker: ViewModifier {
+    @Binding var pinned: Bool
+    @State private var userScrolling = false
+
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content
+                .onScrollPhaseChange { _, phase in userScrolling = phase != .idle }
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 40
+                } action: { _, nearBottom in
+                    if userScrolling || nearBottom { pinned = nearBottom }
+                }
+        } else {
+            content
         }
     }
 }

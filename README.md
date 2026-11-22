@@ -20,10 +20,12 @@ desktop app.
   - otherwise a quick, cheap check (a small model, no tools, not saved) picks the members your
     message concerns, falling back to everyone if it fails;
   - a member with nothing new replies `PASS`, which the app hides;
-  - members don't relay questions through you: an agent that needs a colleague writes `@accountant …`
-    and the app gives that colleague a turn (at most 4 agent replies per message);
-  - in one-to-one chats the agent consults installed colleagues itself (Agent tool) and gives you one
-    combined answer, never "ask the lawyer";
+  - everything is visible: agents never call each other through hidden channels (the Agent tool is
+    blocked for agent runs), and never ask you to relay ("ask the lawyer");
+  - an agent that needs a colleague writes `@accountant …`; that colleague answers once in the chat
+    (one hop: no discussion among agents without you; at most 4 agent replies per message);
+  - in a one-to-one chat the agent ends with `For @lawyer: <question>`, and the app offers an
+    "Add Lawyer to this chat" button: one click turns the chat into a group and the lawyer answers;
   - group rules (no repeating, no "I agree" openers, brief answers) are added to each agent's system
     prompt, and each agent sees everything said since its last turn, including your messages.
 - **Agent rules:** each run can read the plugin cache (`--add-dir ~/.claude/plugins/cache`), so agents
@@ -34,6 +36,11 @@ desktop app.
   You can send files without text.
 - **Missed questions:** if an agent asked you something you didn't answer and it still matters, it
   repeats it briefly under "Still open:" in its next reply; in a group, that member gets a turn.
+- **Scrolling like a messenger:** the chat follows new text only while you are at the bottom;
+  scroll up and it stays where you are. A "↓ n" button shows unread replies below and jumps to the
+  first one. Opening a chat starts at the first unread reply.
+- **Unread counts:** a badge per conversation in the sidebar; replies count as read once they are
+  on screen while the app is active. Zero shows nothing.
 - **Live status:** while an agent works you see what it is doing ("Reading obligations.md",
   "Searching the web", "Using legal-research"), then "typing…" while it writes. Raw tool steps are
   hidden by default (Settings → Messages).

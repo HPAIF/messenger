@@ -34,6 +34,16 @@ struct Message: Identifiable, Codable, Hashable, Sendable {
     var date = Date()
     /// Files attached to a founder message. Optional so older conversation files still load.
     var attachments: [Attachment]?
+    /// Notice in a one-to-one chat: colleagues the agent addressed ("For @lawyer: …") whom the
+    /// founder can add to the conversation with one click. Optional for older files.
+    var inviteAgentIDs: [String]?
+    /// Who asked for the invited colleagues (agent id).
+    var invitedBy: String?
+    /// Agent replies: false until the founder has seen the message on screen. nil (older files,
+    /// founder messages, notices) counts as read.
+    var isRead: Bool?
+
+    var isUnread: Bool { kind == .agent && isRead == false && (!text.isEmpty || error != nil) }
 
     static func user(_ text: String, attachments: [Attachment] = []) -> Message {
         var message = Message(kind: .user, text: text)

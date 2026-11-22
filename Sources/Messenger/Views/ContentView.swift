@@ -14,6 +14,7 @@ struct ContentView: View {
                 if case .conversation(let id) = model.selection, model.store.conversation(id) != nil {
                     ChatView(conversationID: id)
                         .id(id)
+                        .id(id)
                 } else {
                     ContentUnavailableView(
                         "HPAIF Messenger",
@@ -124,7 +125,24 @@ struct ConversationRow: View {
                 }
                 Text(conversation.preview).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
+            Spacer(minLength: 4)
+            if conversation.unreadCount > 0 {
+                UnreadBadge(count: conversation.unreadCount)
+            }
         }
+    }
+}
+
+/// Number of unread agent messages; hidden at zero.
+struct UnreadBadge: View {
+    let count: Int
+    var body: some View {
+        Text(count > 99 ? "99+" : "\(count)")
+            .font(.caption2.bold())
+            .foregroundStyle(.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.accentColor, in: Capsule())
     }
 }
 
